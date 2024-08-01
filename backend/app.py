@@ -7,13 +7,14 @@ from datetime import datetime
 import logging
 from werkzeug.utils import secure_filename
 import os
-from predict import Dexined_predict
+from uaed_predict import UAED_predict
 from quality import evaluate_image_quality
 from classify import classify_image
 from PIL import Image
 import json
 import io
 import zipfile
+from model_manager import check_and_download_models
 
 app = Flask(__name__)
 CORS(app)
@@ -21,11 +22,23 @@ CORS(app)
 # 配置
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 限制上传大小为16MB
 app.config['UPLOAD_EXTENSIONS'] = ['.jpg', '.png', '.jpeg']
-app.config['CHECKPOINT_PATH'] = "/home/yiting/coaste-detect/backend/19_model.pth"
 app.config['THRESHOLD'] = 200  # 可以根据需要调整阈值
-app.config['CLASSIFICATION_MODEL_PATH'] = "/home/yiting/coaste-detect/backend/coast_classifier.pth"  # 确保这个路径是正确的
+app.config['CLASSIFICATION_MODEL_PATH'] = "/app/backend/coast_classifier.pth"
 app.config['ENABLE_QUALITY_CHECK'] = False
 
+# 模型路径配置
+MODEL_PATHS = {
+    'General': "/app/backend/General.pth",
+    'Narrabeen': "/app/backend/Narrabeen.pth",
+    'Gold Coast': "/app/backend/GoldCoast.pth",
+    'CoastSnap': "/app/backend/CoastSnap.pth"
+}
+# MODEL_PATHS = {
+#     'General': "/home/yiting/coaste-detect/backend/General.pth",
+#     'Narrabeen': "/home/yiting/coaste-detect/backend/Narrabeen.pth",
+#     'Gold Coast': "/home/yiting/coaste-detect/backend/GoldCoast.pth",
+#     'CoastSnap': "/home/yiting/coaste-detect/backend/CoastSnap.pth"
+# }
 # 配置日志
 logging.basicConfig(level=logging.DEBUG)
 
@@ -51,9 +64,13 @@ def toggle_quality_check():
     return jsonify({'enabled': app.config['ENABLE_QUALITY_CHECK']})
 
 
-@app.route('/predict', methods=['POST'])
-def predict_route():
+@app.route('/predict/<scene>', methods=['POST'])
+def predict_route(scene):
     app.logger.info(f"Quality check enabled: {app.config['ENABLE_QUALITY_CHECK']}")
+    app.logger.info(f"Selected scene: {scene}")
+
+    if scene not in MODEL_PATHS:
+        return jsonify({'error': 'Invalid scene name'}), 400
 
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
@@ -75,7 +92,7 @@ def predict_route():
             if quality_result != 0:
                 quality_messages = {1: "Low Contrast", 2: "Underexposed", 3: "Overexposed"}
                 return jsonify({
-                    'error': f'Image quality check failed: {quality_messages.get(quality_result, "Unknown issue")}'}), 400
+                    'error': f'Image quality check attention: {quality_messages.get(quality_result, "Unknown issue")}'}), 400
 
             # 图像分类
             pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
@@ -84,9 +101,10 @@ def predict_route():
                 return jsonify({'error': 'Image is not classified as a coastline'}), 400
 
         # 使用预测函数
-        binary_result, color_result, pixels_result = Dexined_predict(
+        model_path = MODEL_PATHS[scene]
+        binary_result, color_result, pixels_result, confidence = UAED_predict(
             image,
-            app.config['CHECKPOINT_PATH'],
+            model_path,
             app.config['THRESHOLD']
         )
 
@@ -106,11 +124,10 @@ def predict_route():
             'binary_result': binary_encoded,
             'color_result': color_encoded,
             'pixels_result': pixels_result,
-            'processingTime': processing_time
+            'processingTime': processing_time,
+            'confidence': confidence
         }
-
-        # 将结果添加到全局变量
-        processed_results.append(result)
+        app.logger.info(f"Returning result with confidence: {confidence}")
 
         return json.dumps(result, cls=NumpyEncoder), 200, {'Content-Type': 'application/json'}
 
@@ -195,5 +212,28 @@ def clear_results():
     return jsonify({'message': 'All results cleared'}), 200
 
 
+model_status = None
+
+
+@app.route('/initialize', methods=['GET'])
+def initialize():
+    global model_status
+    if model_status is None:
+        app.logger.info("Initializing model status")
+        model_status = check_and_download_models()
+    return jsonify(model_status)
+
+
+@app.route('/model_status', methods=['GET'])
+def get_model_status():
+    global model_status
+    if model_status is None:
+        return jsonify({"error": "Model status not initialized"}), 400
+    return jsonify(model_status)
+
+
+# 删除之前的 /model_status 路由
+
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
